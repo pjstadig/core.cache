@@ -8,7 +8,8 @@
 
 (ns ^{:doc "A caching library for Clojure."
       :author "Fogus"}
-  clojure.core.cache)
+  clojure.core.cache
+  (:import (java.lang.ref ReferenceQueue SoftReference)))
 
 ;; # Protocols and Types
 
@@ -458,6 +459,54 @@
   (toString [_]
     (str cache \, \space lruS \, \space lruQ \, \space tick \, \space limitS \, \space limitQ)))
 
+(declare clear-soft-cache)
+
+(defn make-reference [v]
+  (if (nil? v)
+    (SoftReference. ::nil)
+    (SoftReference. v)))
+
+(defcache SoftCache [cache]
+  CacheProtocol
+  (lookup [_ item]
+    (when-let [r (get cache item)]
+      (if (= ::nil (.get r))
+        nil
+        (.get r))))
+  (lookup [_ item not-found]
+    (if-let [r (get cache item)]
+      (if-let [v (.get r)]
+        (if (= ::nil v)
+          nil
+          v)
+        not-found)
+      not-found))
+  (has? [_ item]
+    (and (contains? cache item)
+         (not (nil? (.get (get cache item))))))
+  (hit [this item] (clear-soft-cache cache))
+  (miss [_ item result]
+    (clear-soft-cache (assoc cache item (make-reference result))))
+  (evict [_ key]
+    (clear-soft-cache (dissoc cache key)))
+  (seed [_ base]
+    (SoftCache. (reduce (fn [r [k v]]
+                          (if (instance? SoftReference v)
+                            r
+                            (assoc r k (make-reference v))))
+                        base
+                        base)))
+  Object
+  (toString [_] (str cache)))
+
+(defn clear-soft-cache [cache]
+  (SoftCache. (reduce (fn [r [k v]]
+                        (if-not (.get v)
+                          (dissoc r k v)
+                          r))
+                      cache
+                      cache)))
+
 ;; Factories
 
 (defn basic-cache-factory
@@ -519,3 +568,10 @@
          (map? base)]}
   (seed (LIRSCache. {} {} {} 0 s-history-limit q-history-limit) base))
 
+(defn soft-cache-factory
+  "Returns a SoftReference cache.  Cached values will be referred to with
+  SoftReferences, allowing the values to be garbage collected when there is
+  memory pressure on the JVM."
+  [base]
+  {:pre [(map? base)]}
+  (seed (SoftCache. {}) base))
